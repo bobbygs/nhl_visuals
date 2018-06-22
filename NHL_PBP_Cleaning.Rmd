@@ -1,0 +1,191 @@
+---
+title: "Dashboard Testing"
+author: "Bobby Soule"
+date: "12/3/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/bobbysoule/Documents/College/Graduate/Grad_GitHub/STAT_5014/NHL_Shooting")
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(stringi)
+```
+
+## Import Data from Avilable Seasons
+
+```{r}
+# store file names of play-by-play data for each season
+season.file.names <- c("nhl_pbp20102011.csv", "nhl_pbp20112012.csv", "nhl_pbp20122013.csv", "nhl_pbp20132014.csv",
+                       "nhl_pbp20142015.csv", "nhl_pbp20152016.csv", "nhl_pbp20162017.csv", "nhl_pbp20172018.csv")
+
+# load data from each season and bind rows into one dataset
+pbp.all <- data.frame(matrix(ncol = 57, nrow = 0))
+colnames(pbp.all) <-
+  c("Game_Id", "Date", "Period", "Event", "Description", "Time_Elapsed", "Seconds_Elapsed", "Strength", "Ev_Zone",
+    "Type", "Ev_Team", "Home_Zone", "Away_Team", "Home_Team", "p1_name", "p1_ID", "p2_name", "p2_ID", "p3_name",
+    "p3_ID", "awayPlayer1", "awayPlayer1_id", "awayPlayer2", "awayPlayer2_id", "awayPlayer3", "awayPlayer3_id",
+    "awayPlayer4", "awayPlayer4_id", "awayPlayer5", "awayPlayer5_id", "awayPlayer6", "awayPlayer6_id", "homePlayer1",
+    "homePlayer1_id", "homePlayer2", "homePlayer2_id", "homePlayer3", "homePlayer3_id", "homePlayer4",
+    "homePlayer4_id", "homePlayer5", "homePlayer5_id", "homePlayer6", "homePlayer6_id", "Away_Players",
+    "Home_Players", "Away_Score", "Home_Score", "Away_Goalie", "Away_Goalie_Id", "Home_Goalie", "Home_Goalie_Id",
+    "xC", "yC", "Home_Coach", "Away_Coach", "Year")
+
+for (file.name in season.file.names) {
+  year <- str_sub(file.name, start = 8, end = 15)
+  pbp.new <- fread(input = file.name, header = TRUE, stringsAsFactors = FALSE) %>%
+             select(-V1) %>% mutate(Year = year)
+  pbp.all <- rbind(pbp.all, pbp.new)
+}
+rm(season.file.names, file.name, year, pbp.new)
+```
+
+## Basic Cleaning for All Events
+
+```{r}
+# create some new columns in the play-by-play data
+pbp.all <- pbp.all %>%
+  mutate(Game_Id = as.character(Game_Id),
+         # determine if game is in regular or post season
+         Season = ifelse(str_sub(Game_Id, 1, 1) == "2", "Regular", "Post"),
+         # flag events that occur in shootout
+         Period = ifelse(Season=="Regular" & Period==5, "SO", Period),
+         # correct for PHX changing to ARI; fill empty cells with NA
+         Ev_Team = ifelse(Ev_Team=="", NA, ifelse(Ev_Team=="PHX", "ARI", Ev_Team)),
+         # mark who the opponent of the event team is
+         Op_Team = ifelse(Ev_Team=="", NA, ifelse(Ev_Team==Home_Team, Away_Team, Home_Team)),
+         # determine if event was by home or away team
+         Home_Away = ifelse(Ev_Team=="", NA, ifelse(Ev_Team==Home_Team, "Home", "Away")),
+         # correct zone labels for blocked shots
+         Ev_Zone = ifelse(Event=="BLOCK", ifelse(Ev_Zone=="Def", "Off",
+                                                 ifelse(Ev_Zone=="Off", "Def", Ev_Zone)), Ev_Zone),
+         # correct player name for blocked shots
+         p1_name = ifelse(Event=="BLOCK", p2_name, p1_name),
+         # capitalize the first letter of each player name
+         p1_name = stri_trans_totitle(p1_name),
+         # determine the event team's and opponent team's goalie
+         Ev_Goalie = ifelse(Home_Away=="Home", Home_Goalie, ifelse(Home_Away=="Away", Away_Goalie, NA)),
+         Ev_Goalie = stri_trans_totitle(Ev_Goalie),
+         Op_Goalie = ifelse(Home_Away=="Home", Away_Goalie, ifelse(Home_Away=="Away", Home_Goalie, NA)),
+         Op_Goalie = stri_trans_totitle(Op_Goalie))
+```
+
+## Extract Shot Events; Clean Shot Data
+
+```{r}
+pbp.shots <- pbp.all %>% 
+  # remove shots with no coordinates; shots from shootouts; shots outside offensive zone
+  filter(Event %in% c("SHOT", "GOAL", "MISS", "BLOCK"), Ev_Zone=="Off", !(Period=="SO"),
+         !(is.na(xC) | is.na(yC))) %>%
+  mutate(Direction = ifelse(xC > 0, "Right", "Left"),
+         # adjust corrdinates based off of direction
+         X = ifelse(Direction=="Right", 42.5 - yC, yC + 42.5),
+         Y = ifelse(Direction=="Right", xC + 100, 100 - xC),
+         # calculate distance from goal
+         Distance = round(sqrt((X - 42.5)^2 + (Y - 189)^2), digits = 1),
+         # determine strength
+         Home_Skaters = as.numeric(str_sub(Strength, start = 1, end = 1)),
+         Away_Skaters = as.numeric(str_sub(Strength, start = 3, end = 3)),
+         Ev_Skaters = ifelse(Ev_Team=="Home", Home_Skaters, Away_Skaters),
+         Other_Skaters = ifelse(Ev_Team=="Home", Away_Skaters, Home_Skaters),
+         Strength = ifelse(Ev_Skaters==Other_Skaters, "Even Strength",
+                           ifelse(Ev_Skaters>Other_Skaters, "Power Play", "Short-handed")),
+         # determine goal differential
+         Ev_Score = ifelse(Ev_Team=="Home", Home_Score, Away_Score),
+         Other_Score = ifelse(Ev_Team=="Home", Away_Score, Home_Score),
+         Differential = ifelse(Ev_Score==Other_Score, "Tied",
+                               ifelse(Ev_Score>Other_Score, "Leading", "Trailing"))) %>%
+  # select the needed variables
+  select(Year, Season, Game_Id, Date, Home_Team, Away_Team, Period, Seconds_Elapsed, Event, Type, Ev_Team, Op_Team,
+         Home_Away, Ev_Zone, X, Y, Distance, p1_name, Ev_Goalie, Op_Goalie, Strength, Home_Skaters, Away_Skaters,
+         Differential, Home_Score, Away_Score, Description)
+```
+
+## Save Cleaned Data as CSV
+
+```{r}
+fwrite(pbp.shots, file = "nhl_pbp_off_shots.csv", row.name = FALSE)
+rm(pbp.all, pbp.shots)
+```
+
+## Create List of Hexagonal Grids for All Bin Sizes
+
+```{r}
+# create fine grid over entire x-y range
+xy.grid <- expand.grid(x = 0:85, y = 125:189)
+
+# create empty dataframe to store all of the hexagonal grids
+all.grids <- data.frame(matrix(ncol = 14, nrow = 0))
+colnames(all.grids) <- c("num.bins", "id", "x", "y", "col", "row", "nbr1", "nbr2", "nbr3",
+                         "nbr4", "nbr5", "nbr6", "num.nbr")
+
+# create hexagonal grid dataframes for bin sizes 15-35
+for (num.bins in 15:35) {
+  
+  # generate hexbin object and extract information
+  hbin.grid <- hexbin(xy.grid$x, xy.grid$y, xbins = num.bins, shape = 0.75, xbnds = c(0,85), ybnds = c(124.5, 189))
+  cents.grid <- hcell2xy(hbin.grid)
+  hex.grid <- data.frame(id = hbin.grid@cell, x = cents.grid$x, y = cents.grid$y) %>%
+              mutate(col = NA, row = NA, nbr1 = NA, nbr2 = NA, nbr3 = NA,
+                     nbr4 = NA, nbr5 = NA, nbr6 = NA, num.nbr = 0)
+  
+  # determine the row and column for each bin
+  cols <- hex.grid$x %>% unique %>% sort
+  rows <- hex.grid$y %>% unique %>% sort
+  for (i in 1:width(hex.grid)) {
+    x <- hex.grid[["x"]][i]
+    y <- hex.grid[["y"]][i]
+    hex.grid[["col"]][i] <- which(x == cols)
+    hex.grid[["row"]][i] <- which(y == rows)
+  }
+  
+  # find the ids for each bin's neighbors
+  for (i in 1:width(hex.grid)) {
+    c <- hex.grid[["col"]][i]
+    r <- hex.grid[["row"]][i]
+    # neighbor one
+    nbr <- filter(hex.grid, col == c+1 & row == r+1)
+    if (width(nbr) > 0) {
+      hex.grid[["nbr1"]][i] <- nbr$id
+    }
+    # neighbor two
+    nbr <- filter(hex.grid, col == c+2 & row == r)
+    if (width(nbr) > 0) {
+      hex.grid[["nbr2"]][i] <- nbr$id
+    }
+    # neighbor three
+    nbr <- filter(hex.grid, col == c+1 & row == r-1)
+    if (width(nbr) > 0) {
+      hex.grid[["nbr3"]][i] <- nbr$id
+    }
+    # neighbor four
+    nbr <- filter(hex.grid, col == c-1 & row == r-1)
+    if (width(nbr) > 0) {
+      hex.grid[["nbr4"]][i] <- nbr$id
+    }
+    # neighbor five
+    nbr <- filter(hex.grid, col == c-2 & row == r)
+    if (width(nbr) > 0) {
+      hex.grid[["nbr5"]][i] <- nbr$id
+    }
+    # neighbor six
+    nbr <- filter(hex.grid, col == c-1 & row == r+1)
+    if (width(nbr) > 0) {
+      hex.grid[["nbr6"]][i] <- nbr$id
+    }
+  }
+  
+  # mark each grid with bin size and combine with dataframe of all grids
+  hex.grid <- hex.grid %>% mutate(bins = num.bins) %>% select(bins, id:num.nbr)
+  all.grids <- rbind(all.grids, hex.grid)
+}
+
+# remove all unneeded objects from the environment
+rm(xy.grid, hbin.grid, cents.grid, hex.grid, i, c, r, cols, rows, num.bins)
+
+# write the all.grids dataframe to a csv file
+fwrite(all.grids, file = "nhl_hex_grids.csv", row.name = FALSE)
+```

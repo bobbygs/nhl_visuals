@@ -1,0 +1,404 @@
+---
+title: "NHL Shooting Locations"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+# make error messages appear as default message in dashboard
+options(shiny.sanitize.errors = TRUE)
+
+# load libraries
+library(ggplot2)
+library(stringr)
+library(dplyr)
+
+# set working directory
+setwd("/Users/bobbysoule/Documents/College/Graduate/Grad_GitHub/STAT_5014/NHL_Shooting")
+
+# load data, rink image
+shots.all <- data.table::fread(input = "nhl_pbp_off_shots.csv", header = TRUE)
+d.zone.img <- imager::load.image("hockey_rink_def.png")
+o.zone.img <- imager::load.image("hockey_rink_off.png")
+```
+
+
+
+Heat Map
+=====================================
+
+Inputs {.sidebar data-width=200}
+-----------------------------------------------------------------------
+
+```{r inputs}
+# drop down for team
+selectInput(inputId = "Team", label = "TEAM:",
+            choices = c(`Anaheim Ducks`="ANA", `Arizona Coyotes`="ARI", `Atlanta Thrashers`="ATL",
+                        `Boston Bruins`="BOS", `Buffalo Sabres`="BUF", `Calgary Flames`="CGY",
+                        `Carolina Hurricanes`="CAR", `Chicago Blackhawks`="CHI", `Colorado Avalanche`="COL",
+                        `Columbus Blue Jackets`="CBJ", `Dallas Stars`="DAL", `Detroit Red Wings`="DET",
+                        `Edmonton Oilers`="EDM", `Florida Panthers`="FLA", `Los Angeles Kings`="L.A",
+                        `Minnesota Wild`="MIN", `Montreal Canadiens`="MTL", `Nashville Predators`="NSH",
+                        `New Jersey Devils`="N.J", `New York Islanders`="NYI", `New York Rangers`="NYR",
+                        `Ottawa Senators`="OTT", `Philadelphia Flyers`="PHI", `Pittsburgh Penguins`="PIT",
+                        `San Jose Sharks`="S.J", `St. Louis Blues`="STL", `Tampa Bay Lightning`="T.B",
+                        `Toronto Maple Leafs`="TOR", `Vancouver Canucks`="VAN", `Vegas Golden Knights`="VGK",
+                        `Washington Capitals`="WSH", `Winnipeg Jets`="WPG"),
+            selected = "WSH")
+
+# get the players for the selected team
+team.players <- reactive({
+  players <- shots.all %>% filter(Ev_Team==input$Team) %>% select(p1_name) %>% arrange(p1_name) %>% unique 
+  return(unname(as.vector(players)))
+})
+
+## check to see why holtby is showing up in list
+renderUI({
+  selectInput(inputId = "Player", label = "PLAYER:", choices = c("All Players", Players = team.players()),
+              selected = "All Players")
+})
+
+# get the seasons for the selected player
+player.years <- reactive({
+  if (input$Player=="All Players") {
+    seasons <- shots.all %>% filter(Ev_Team==input$Team) %>% select(Year) %>% unique
+  } else {
+    seasons <- shots.all %>% filter(Ev_Team==input$Team, p1_name==input$Player) %>% select(Year) %>% unique
+  }
+  years <- sapply(seasons, function(x) as.numeric(str_sub(x, start = 1, end = 4)))
+  return(years)
+})
+
+# slide input for year
+renderUI({
+  years <- player.years()
+  sliderInput(inputId = "Year", label = "YEAR:", min = min(years), max = max(years),
+              value = c(min(years), max(years)), step = 1, round = 0, ticks = FALSE, sep = "")  
+})
+
+# check box for season type (regular vs playoffs)
+checkboxGroupInput(inputId = "Season", label = "SEASON:",
+                   choices = c(Regular = "Regular", Playoffs = "Post"), selected = c("Regular", "Post"),
+                   inline = TRUE)
+
+# check box for event type (sog, goal, miss, block)
+checkboxGroupInput(inputId = "ev.type", label = "EVENT:",
+                   choices = c(Shot="SHOT", Goal="GOAL", Miss="MISS", Block="BLOCK"),
+                   selected = c("SHOT", "GOAL"), inline = FALSE)
+
+
+# drop down for shot type (wrist, slap, backhand, etc.)
+selectInput(inputId = "ev.type2", label = "SHOT TYPE:",
+            choices = c("All Shot Types", `Wrist Shot`="WRIST SHOT", `Slap Shot`="SLAP SHOT",
+                        `Snap Shot`="SNAP SHOT", Backhand="BACKHAND", `Wrap-around`="WRAP-AROUND",
+                        Deflected="DEFLECTED", `Tip-in`="TIP-IN", None=""),
+            selected = "All Shot Types")
+
+# drop down for strength (even, pp, pk)
+selectInput(inputId = "strength", label = "STRENGTH:",
+            choices = c("All Strengths", "Even Strength", "Power Play", "Short-handed"),
+            selected = "All Strengths")
+
+# drop down for differential (tied, leading, trailing)
+selectInput(inputId = "score", label = "SCORE:", choices = c("All Scores", "Leading", "Tied", "Trailing"),
+                   selected = "All Scores")
+
+# switch for data points (on/off)
+radioButtons(inputId = "dat.pts", label = "DATA POINTS:", choices = c("On", "Off"), selected = "Off",
+             inline = TRUE)
+```
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Heat Map of Shots
+
+```{r heatmap}
+# filter the data based off of shiny inputs
+shots.filt = reactive({
+  years <- seq(input$Year[1], input$Year[2]) %>% sapply(function(x) as.numeric(paste(x, x+1, sep = "")))
+  shots <- shots.all %>% filter(Ev_Team==input$Team, Year %in% years, Season %in% input$Season,
+                                Event %in% input$ev.type)
+  if (input$Player != "All Players") {
+    shots <- shots %>% filter(p1_name==input$Player)
+  }
+  if (input$ev.type2 != "All Shot Types") {
+    shots <- shots %>% filter(Type==input$ev.type2)
+  }
+  if (input$strength != "All Strengths") {
+    shots <- shots %>% filter(Strength==input$strength)
+  }
+  if (input$score != "All Scores") {
+    shots <- shots %>% filter(Differential==input$score)
+  }
+  return(shots)
+})
+
+# render the heat map
+renderPlot({
+  shots <- shots.filt()
+  
+  heatmap <- ggplot(shots, aes(X,Y)) + 
+    annotation_raster(o.zone.img, xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf) +
+    scale_x_continuous(limits = c(0, 85), expand = c(0, 0)) +
+    scale_y_continuous(limits = c(124.5, 200), expand = c(0, 0)) +
+    theme(legend.position = "none",
+          axis.line=element_blank(), axis.ticks=element_blank(),
+          axis.text.x=element_blank(), axis.text.y=element_blank(),
+          axis.title.x=element_blank(), axis.title.y=element_blank(),
+          panel.border = element_rect(colour = "black", fill=NA, size=2)) +
+    coord_fixed() +
+    stat_density2d(geom = "polygon", aes(fill = ..level..), alpha = 0.35) +
+    scale_fill_distiller(palette = "Spectral", direction = -1)
+  
+  # check to see if data points should be added
+  if (input$dat.pts=="On") {
+    heatmap <- heatmap + geom_point(size = 0.5, alpha = 0.25)
+  }
+  
+  print(heatmap)
+})
+```
+
+Column {data-width=200}
+-----------------------------------------------------------------------
+
+### Value Boxes
+
+```{r summary}
+renderPrint({
+  print("In progress...")
+})
+```
+
+
+
+Goldsberry Plot
+=====================================
+
+Inputs {.sidebar data-width=200}
+-----------------------------------------------------------------------
+
+```{r inputs2}
+# dropdown for team
+selectInput(inputId = "Team.GB", label = "TEAM:",
+            choices = c(`Anaheim Ducks`="ANA", `Arizona Coyotes`="ARI", `Atlanta Thrashers`="ATL",
+                        `Boston Bruins`="BOS", `Buffalo Sabres`="BUF", `Calgary Flames`="CGY",
+                        `Carolina Hurricanes`="CAR", `Chicago Blackhawks`="CHI", `Colorado Avalanche`="COL",
+                        `Columbus Blue Jackets`="CBJ", `Dallas Stars`="DAL", `Detroit Red Wings`="DET",
+                        `Edmonton Oilers`="EDM", `Florida Panthers`="FLA", `Los Angeles Kings`="L.A",
+                        `Minnesota Wild`="MIN", `Montreal Canadiens`="MTL", `Nashville Predators`="NSH",
+                        `New Jersey Devils`="N.J", `New York Islanders`="NYI", `New York Rangers`="NYR",
+                        `Ottawa Senators`="OTT", `Philadelphia Flyers`="PHI", `Pittsburgh Penguins`="PIT",
+                        `San Jose Sharks`="S.J", `St. Louis Blues`="STL", `Tampa Bay Lightning`="T.B",
+                        `Toronto Maple Leafs`="TOR", `Vancouver Canucks`="VAN", `Vegas Golden Knights`="VGK",
+                        `Washington Capitals`="WSH", `Winnipeg Jets`="WPG"),
+            selected = "WSH")
+
+# dropdown for opponents
+renderUI({
+  opponents <- c(`Anaheim Ducks`="ANA", `Arizona Coyotes`="ARI", `Atlanta Thrashers`="ATL", `Boston Bruins`="BOS",
+    `Buffalo Sabres`="BUF", `Calgary Flames`="CGY",`Carolina Hurricanes`="CAR", `Chicago Blackhawks`="CHI",
+    `Colorado Avalanche`="COL", `Columbus Blue Jackets`="CBJ", `Dallas Stars`="DAL", `Detroit Red Wings`="DET",
+    `Edmonton Oilers`="EDM", `Florida Panthers`="FLA", `Los Angeles Kings`="L.A", `Minnesota Wild`="MIN",
+    `Montreal Canadiens`="MTL", `Nashville Predators`="NSH", `New Jersey Devils`="N.J", `New York Islanders`="NYI",
+    `New York Rangers`="NYR", `Ottawa Senators`="OTT", `Philadelphia Flyers`="PHI", `Pittsburgh Penguins`="PIT",
+    `San Jose Sharks`="S.J", `St. Louis Blues`="STL", `Tampa Bay Lightning`="T.B", `Toronto Maple Leafs`="TOR",
+    `Vancouver Canucks`="VAN", `Vegas Golden Knights`="VGK", `Washington Capitals`="WSH", `Winnipeg Jets`="WPG")
+  selectInput(inputId = "Opponent.GB", label = "OPPONENT:",
+              choices = c("All Opponents", opponents[opponents != input$Team.GB]),
+              selected = "All Opponents")
+})
+
+# get the seasons for the selected team and opponent
+opponent.years <- reactive({
+  if (input$Opponent.GB=="All Opponents") {
+    seasons <- shots.all %>% filter(Ev_Team==input$Team.GB) %>% select(Year) %>% unique
+  } else {
+    seasons <- shots.all %>% filter(Ev_Team==input$Team.GB, Op_Team==input$Opponent.GB) %>% select(Year) %>% unique
+  }
+  years <- sapply(seasons, function(x) as.numeric(str_sub(x, start = 1, end = 4)))
+  return(years)
+})
+
+# slide input for year
+renderUI({
+  years <- opponent.years()
+  sliderInput(inputId = "Year.GB", label = "YEAR:", min = min(years), max = max(years),
+              value = c(min(years), max(years)), step = 1, round = 0, ticks = FALSE, sep = "")
+})
+
+# check box for season type (regular vs playoffs)
+checkboxGroupInput(inputId = "Season.GB", label = "SEASON:",
+                   choices = c(Regular = "Regular", Playoffs = "Post"), selected = c("Regular", "Post"),
+                   inline = TRUE)
+
+# get the shooters for the selected team
+team.shooters <- reactive({
+  years <- seq(input$Year.GB[1], input$Year.GB[2]) %>% sapply(function(x) as.numeric(paste(x, x+1, sep = "")))
+  if (input$Opponent.GB=="All Opponents") {
+    shooters <- shots.all %>% filter(Ev_Team==input$Team.GB, Year %in% years, Season %in% input$Season.GB) %>%
+                select(p1_name) %>% arrange(p1_name) %>% unique
+  } else {
+    shooters <- shots.all %>% filter(Ev_Team==input$Team.GB, Op_Team==input$Opponent.GB, Year %in% years,
+                                     Season %in% input$Season.GB) %>%
+                select(p1_name) %>% arrange(p1_name) %>% unique
+  }
+  return(unname(as.vector(shooters)))
+})
+
+# dropdown for shooters (shots for)
+renderUI({
+  selectInput(inputId = "ShooterFor.GB", label = paste(input$Team.GB, "SHOOTER:"),
+              choices = c("All Shooters", Shooters = team.shooters()), selected = "All Shooters")
+})
+
+# get the goalies for the selected team
+team.goalies <- reactive({
+  years <- seq(input$Year.GB[1], input$Year.GB[2]) %>% sapply(function(x) as.numeric(paste(x, x+1, sep = "")))
+  if (input$Opponent.GB=="All Opponents") {
+    goalies <- shots.all %>% filter(Op_Team==input$Team.GB, Year %in% years, Season %in% input$Season.GB) %>%
+                select(Op_Goalie) %>% arrange(Op_Goalie) %>% unique
+  } else {
+    goalies <- shots.all %>% filter(Op_Team==input$Team.GB, Ev_Team==input$Opponent.GB, Year %in% years,
+                                     Season %in% input$Season.GB) %>%
+                select(Op_Goalie) %>% arrange(Op_Goalie) %>% unique
+  }
+  return(unname(as.vector(goalies)))
+})
+
+# dropdown for goalies (shots against)
+renderUI({
+  selectInput(inputId = "GoalieAg.GB", label = paste(input$Team.GB, "GOALIE:"),
+              choices = c("All Goalies", Goalies = team.goalies()), selected = "All Goalies")
+})
+
+# get the shooters for the selected opponent
+opponent.shooters <- reactive({
+  years <- seq(input$Year.GB[1], input$Year.GB[2]) %>% sapply(function(x) as.numeric(paste(x, x+1, sep = "")))
+  if (input$Opponent.GB=="All Opponents") {
+    shooters <- shots.all %>% filter(Op_Team==input$Team.GB, Year %in% years, Season %in% input$Season.GB)
+  } else {
+    shooters <- shots.all %>% filter(Op_Team==input$Team.GB, Ev_Team==input$Opponent.GB, Year %in% years,
+                                     Season %in% input$Season.GB)
+  }
+  if (input$GoalieAg.GB=="All Goalies") {
+    shooters <- shooters %>% select(p1_name) %>% arrange(p1_name) %>% unique
+  } else {
+    shooters <- shooters %>% filter(Op_Goalie==input$GoalieAg.GB) %>% select(p1_name) %>% arrange(p1_name) %>% unique
+  }
+  return(unname(as.vector(shooters)))
+})
+
+# dropdown for shooters (shots against)
+renderUI({
+  selectInput(inputId = "ShooterAg.GB", label = ifelse(input$Opponent.GB=="All Opponents", yes = "OPP SHOOTER:",
+                                                       no = paste(input$Opponent.GB, "SHOOTER:")),
+              choices = c("All Shooters", Shooters = opponent.shooters()), selected = "All Shooters")
+})
+
+# get the goalies for the selected opponent
+opponent.goalies <- reactive({
+  years <- seq(input$Year.GB[1], input$Year.GB[2]) %>% sapply(function(x) as.numeric(paste(x, x+1, sep = "")))
+  if (input$Opponent.GB=="All Opponents") {
+    goalies <- shots.all %>% filter(Ev_Team==input$Team.GB, Year %in% years, Season %in% input$Season.GB)
+  } else {
+    goalies <- shots.all %>% filter(Ev_Team==input$Team.GB, Op_Team==input$Opponent.GB, Year %in% years,
+                                     Season %in% input$Season.GB)
+  }
+  if (input$ShooterFor.GB=="All Shooters") {
+    goalies <- goalies %>% select(Op_Goalie) %>% arrange(Op_Goalie) %>% unique
+  } else {
+    goalies <- goalies %>% filter(p1_name==input$ShooterFor.GB) %>% select(Op_Goalie) %>% arrange(Op_Goalie) %>%
+               unique
+  }
+  return(unname(as.vector(goalies)))
+})
+
+# dropdown for shooters (shots against)
+renderUI({
+  selectInput(inputId = "GoalieFor.GB", label = ifelse(input$Opponent.GB=="All Opponents", yes = "OPP GOALIE:",
+                                                       no = paste(input$Opponent.GB, "GOALIE:")),
+              ## NEED TO FIX FOR WHEN `Goalies` IS OF LENGTH ONE ##
+              choices = c("All Goalies", Goalies = opponent.goalies()), selected = "All Goalies")
+})
+
+# check box for shot attempts to include (sog, miss, block)
+checkboxGroupInput(inputId = "ev.type.GB", label = "SHOT ATTEMPTS:",
+                   choices = c(Shot="SHOT", Miss="MISS", Block="BLOCK"),
+                   selected = "SHOT", inline = FALSE)
+
+# drop down for shot type (wrist, slap, backhand, etc.)
+selectInput(inputId = "ev.type2.GB", label = "SHOT TYPE:",
+            choices = c("All Shot Types", `Wrist Shot`="WRIST SHOT", `Slap Shot`="SLAP SHOT",
+                        `Snap Shot`="SNAP SHOT", Backhand="BACKHAND", `Wrap-around`="WRAP-AROUND",
+                        Deflected="DEFLECTED", `Tip-in`="TIP-IN", None=""),
+            selected = "All Shot Types")
+
+# drop down for strength (even, pp, pk)
+selectInput(inputId = "strength.GB", label = "STRENGTH:",
+            choices = c("All Strengths", "Even Strength", "Power Play", "Short-handed"),
+            selected = "All Strengths")
+
+# drop down for differential (tied, leading, trailing)
+selectInput(inputId = "score.GB", label = "SCORE:", choices = c("All Scores", "Leading", "Tied", "Trailing"),
+                   selected = "All Scores")
+
+# switch for shape (circle/hexagon)
+radioButtons(inputId = "shape.GB", label = "SHAPE:", choices = c(Circle="cir", Hexagon="hex"), selected = "cir",
+             inline = TRUE)
+
+# switch for data points (on/off)
+radioButtons(inputId = "dat.pts.GB", label = "DATA POINTS:", choices = c("On", "Off"), selected = "Off",
+             inline = TRUE)
+```
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Goldsberry Plot of Shooting Percentages (Shots For)
+
+```{r goldsberry.for}
+# filter the data based off of shiny inputs
+shots.for = reactive({
+  
+  years <- seq(input$Year[1], input$Year[2]) %>% sapply(function(x) as.numeric(paste(x, x+1, sep = "")))
+  shot.atts <- c(input$ev.type.GB, "GOAL")
+  
+  shots <- shots.all %>% filter(Ev_Team==input$Team, Year %in% years, Season %in% input$Season,
+                                Event %in% input$ev.type)
+  if (input$Player != "All Players") {
+    shots <- shots %>% filter(p1_name==input$Player)
+  }
+  if (input$ev.type2 != "All Shot Types") {
+    shots <- shots %>% filter(Type==input$ev.type2)
+  }
+  if (input$strength != "All Strengths") {
+    shots <- shots %>% filter(Strength==input$strength)
+  }
+  if (input$score != "All Scores") {
+    shots <- shots %>% filter(Differential==input$score)
+  }
+  return(shots)
+})
+```
+
+### Goldsberry Plot of Shooting Percentages (Shots Against)
+
+```{r goldsberry.ag}
+renderText(print(c("GOAL", input$ev.type.GB)))
+```
+
+Column {data-width=200}
+-----------------------------------------------------------------------
+
+### Value Boxes
+
+```{r summary2}
+renderPrint({
+  print("In progress...")
+})
+```

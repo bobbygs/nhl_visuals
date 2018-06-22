@@ -1,0 +1,177 @@
+---
+title: "Dashboard Testing"
+author: "Bobby Soule"
+date: "12/3/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(imager)
+library(ggplot2)
+library(ggforce)
+library(hexbin)
+setwd("/Users/bobbysoule/Documents/College/Graduate/Grad_GitHub/STAT_5014/NHL_Shooting")
+```
+
+## Load Data
+
+```{r}
+d.zone.img <- load.image("hockey_rink_def.png")
+o.zone.img <- load.image("hockey_rink_off.png")
+shots.all <- fread(input = "nhl_pbp_off_shots.csv", header = TRUE, stringsAsFactors = FALSE)
+grids.all <- fread(input = "nhl_hex_grids.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+## Heat Map
+
+```{r}
+shots <- filter(shots.all, p1_name=="ALEX OVECHKIN", Event %in% c("SHOT", "GOAL"))
+
+make.heatmap <- function(dat, for.ag = "for", points = FALSE) {
+  if (for.ag == "for") {
+    heatmap <- ggplot(data = dat, aes(x = X, y = Y)) + 
+      annotation_raster(o.zone.img, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+      scale_x_continuous(limits = c(0, 85), expand = c(0, 0)) +
+      scale_y_continuous(limits = c(124.5, 200), expand = c(0, 0))
+  } else if (for.ag == "ag") {
+    heatmap <- ggplot(data = dat, aes(x = 85 - X, y = 200 - Y)) + 
+      annotation_raster(d.zone.img, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+      scale_x_continuous(limits = c(0, 85), expand = c(0, 0)) +
+      scale_y_continuous(limits = c(0, 75.5), expand = c(0, 0))
+  }
+  heatmap <- heatmap +
+    theme(legend.position = "none",
+          axis.line = element_blank(), axis.ticks = element_blank(),
+          axis.text.x = element_blank(), axis.text.y = element_blank(),
+          axis.title.x = element_blank(), axis.title.y = element_blank(),
+          panel.border = element_rect(colour = "black", fill = NA, size = 2)) +
+    coord_fixed() +
+    stat_density2d(geom = "polygon", aes(fill = ..level..), alpha = 0.35) +
+    scale_fill_distiller(palette = "Spectral", direction = -1)
+  if (points) {
+    heatmap <- heatmap + geom_point(size = 0.5, alpha = 0.25)
+  }
+  return(heatmap)
+}
+
+heatmap <- make.heatmap(dat = shots, for.ag = "for", points = FALSE)
+print(heatmap)
+```
+
+## Goldsberry Plot
+
+```{r}
+shots.for <- filter(shots.all, Ev_Team=="WSH", Event %in% c("SHOT", "GOAL"), (Y < 189 & Y > 124.5))
+shots.ag <- filter(shots.all, Op_Team=="WSH", Event %in% c("SHOT", "GOAL"), (Y < 189 & Y > 124.5))
+
+get.sperc.hex <- function(dat, num.bins = 25, smoothing = TRUE) {
+  # create hexagonal bins for shots
+  hbin.shots <- hexbin(dat$X, dat$Y, xbins = num.bins, shape = 0.75, xbnds = c(0, 85), ybnds = c(124.5, 189))
+  shots.hex <- data.frame(id = hbin.shots@cell, shots = hbin.shots@count)
+  # create hexagonal bins for goals
+  hbin.goals <- hexbin(dat[dat$Event=="GOAL", ]$X, dat[dat$Event=="GOAL", ]$Y, xbins = num.bins, shape = 0.75,
+                       xbnds = c(0, 85), ybnds = c(124.5, 189))
+  goals.hex <- data.frame(id = hbin.goals@cell, goals = hbin.goals@count)
+  # merge binned data for shots and goals
+  sperc.hex <- left_join(x = shots.hex, y = goals.hex, by = "id")
+  # merge binned data with hexagonal grid
+  grid.hex <- grids.all %>% filter(bins == num.bins) %>% select(-bins)
+  sperc.hex <- left_join(x = grid.hex, y = sperc.hex, by = "id") %>%
+               mutate(shots = ifelse(is.na(shots), yes = 0, no = shots),
+                      goals = ifelse(is.na(goals), yes = 0, no = goals),
+                      tot.shots = NA, tot.goals = NA)
+  if (!smoothing) {
+    # finalize shooting percentage dataframe for unsmoothed bins
+    sperc.hex <- sperc.hex %>%
+                 filter(shots != 0) %>%                
+                 mutate(sperc = goals / shots,         
+                        dec = as.integer(cut(shots, quantile(shots, probs=0:10/10), include.lowest=TRUE))) %>% 
+                 select(id, x, y, shots, goals, sperc, dec)
+  } else if (smoothing) {
+    # calculate the total number of shots and goals for each bin's region
+    # determine the number of neighbors each bin has
+    for (i in 1:width(sperc.hex)) {
+      nbr.ids <- unname(sperc.hex[i, 6:11])
+      nbr.ids <- nbr.ids[!is.na(nbr.ids)]
+      num.nbr <- 0
+      tot.shots <- as.numeric(sperc.hex[i, "shots"])
+      tot.goals <- as.numeric(sperc.hex[i, "goals"])
+      for (nbr.id in nbr.ids) {
+        nbr <- sperc.hex[sperc.hex$id == nbr.id, ]
+        tot.shots <- as.numeric(tot.shots + nbr["shots"])
+        tot.goals <- as.numeric(tot.goals + nbr["goals"])
+        if (nbr["shots"] > 0) {
+          num.nbr <- num.nbr + 1
+        }
+      }
+      sperc.hex[i, "num.nbr"] <- num.nbr
+      sperc.hex[i, "tot.shots"] <- tot.shots
+      sperc.hex[i, "tot.goals"] <- tot.goals
+    }
+    # finalize shooting percentage dataframe for smoothed bins
+    sperc.hex <- sperc.hex %>% 
+                 filter(shots != 0 | (tot.shots != 0 & num.nbr >= 3)) %>%
+                 mutate(shots = tot.shots, goals = tot.goals,
+                        sperc = goals / shots,
+                        dec = as.integer(cut(shots, quantile(shots, probs=0:10/10), include.lowest=TRUE))) %>% 
+                 select(id, x, y, shots, goals, sperc, dec)
+  }
+  return(sperc.hex)
+}
+
+make.gb.plot <- function(dat, num.bins = 25, shape = "cir", for.ag = "for", points = FALSE, shots) {
+  # set up blank ggplot depending on whether shot are for or against
+  if (for.ag == "for") {
+    gb.plot <- ggplot() +
+      annotation_raster(o.zone.img, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+      scale_x_continuous(limits = c(0, 85), expand = c(0, 0)) +
+      scale_y_continuous(limits = c(124.5, 200), expand = c(0, 0))
+    xC <- dat$x
+    yC <- dat$y
+  } else if (for.ag == "ag") {
+    gb.plot <- ggplot() +
+      annotation_raster(d.zone.img, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+      scale_x_continuous(limits = c(0, 85), expand = c(0, 0)) +
+      scale_y_continuous(limits = c(0, 75.5), expand = c(0, 0))
+    xC <- 85 - dat$x
+    yC <- 200 - dat$y
+  }
+  # change settings for ggplot
+  gb.plot <- gb.plot +
+    theme(axis.line = element_blank(), axis.ticks = element_blank(),
+          axis.text.x = element_blank(), axis.text.y = element_blank(),
+          axis.title.x = element_blank(), axis.title.y = element_blank(),
+          panel.border = element_rect(colour = "black", fill = NA, size = 2)) +
+    coord_fixed()
+  # fill ggplot with hexagons
+  if (shape == "hex") {
+    gb.plot <- gb.plot +
+      geom_hex(data = dat, aes(x = xC, y = yC, fill = sperc), stat = "identity", alpha = 0.7) +
+      scale_fill_distiller(palette = "Spectral", direction = -1) + 
+      labs(fill = "Shooting %")
+  # fill ggplot with circles
+  } else if (shape == "cir") {
+    gb.plot <- gb.plot +
+      geom_circle(data = dat, aes(x0 = xC, y0 = yC, r = (dec*85)/(2*num.bins*10), fill = sperc),
+                  alpha = 0.8, linetype = "blank") +
+      scale_fill_distiller(palette = "Spectral", direction = -1) + 
+      labs(fill = "Shooting %")
+  # add points for raw shot data
+  }
+  if (points) {
+    gb.plot <- gb.plot +
+      geom_point(data = shots, aes(x = X, y = Y), size = 0.5, alpha = 0.25)
+  }
+  # return the ggplot
+  return(gb.plot)
+}
+
+sperc.hex <- get.sperc.hex(dat = shots.for, num.bins = 25, smoothing = TRUE)
+gb.plot <- make.gb.plot(dat = sperc.hex, num.bins = 25, shape = "cir", for.ag = "for",
+                        points = FALSE, shots = shots.for)
+
+print(gb.plot)
+```

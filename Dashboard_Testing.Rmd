@@ -1,0 +1,136 @@
+---
+title: "Dashboard Testing"
+author: "Bobby Soule"
+date: "12/3/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+setwd("/Users/bobbysoule/Documents/College/Graduate/Grad_GitHub/STAT_5014")
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+```
+
+## Import Data from Avilable Seasons
+
+```{r}
+# store file names of play-by-play data for each season
+season.file.names <- c("nhl_pbp20102011.csv", "nhl_pbp20112012.csv", "nhl_pbp20122013.csv", "nhl_pbp20132014.csv",
+                       "nhl_pbp20142015.csv", "nhl_pbp20152016.csv", "nhl_pbp20162017.csv", "nhl_pbp20172018.csv")
+
+# load data from each season and bind rows into one dataset
+pbp.all <- NA
+for (file.name in season.file.names) {
+  year <- str_sub(file.name, start = 8, end = 15)
+  pbp.new <- read.csv(file.name, header = TRUE, stringsAsFactors = FALSE) %>% 
+               mutate(Year = year)
+  pbp.all <- rbind(pbp.all, pbp.new)
+
+}
+rm(season.file.names, file.name, pbp.new)
+```
+
+## Create New Variables for All Event Types
+
+```{r}
+# create some new columns in the play-by-play data
+pbp.all <- pbp.all %>%
+  # remove empty rows
+  filter(!is.na(X)) %>%
+  mutate(Game_Id = as.character(Game_Id),
+         # determine if game is in regular or post season
+         Season = ifelse(str_sub(Game_Id, 1, 1) == "2", "Regular", "Post"),
+         # determine if event was by home or away team
+         Ev_Team = ifelse(Ev_Team==Home_Team, "Home", ifelse(Ev_Team==Away_Team, "Away", NA))) %>% 
+  # select needed variables
+  select(Year, Season, Game_Id, Date, Home_Team, Away_Team, Period, Seconds_Elapsed, Event, Type, Ev_Team, 
+         Ev_Zone, xC, yC, Description, p1_name, p1_ID, p2_name, p2_ID, Strength, Home_Score, Away_Score)
+```
+
+## Extract Shot and Goal Events; Determine Direction of Play
+
+```{r}
+pbp.shots <- pbp.all %>% 
+  # note that shots with no coordinates have been removed
+  filter(Event %in% c("SHOT", "GOAL") & (!is.na(xC) & !is.na(yC)) & !(Season=="Regular" & Period==5)) %>% 
+  mutate(Direction = NA)
+
+all.ygp <- unique(pbp.shots[c("Year", "Game_Id", "Period")])
+for (row in 1:dim(all.ygp)[1]) {
+  year <- all.ygp[row, 1]
+  game <- all.ygp[row, 2]
+  period <- all.ygp[row, 3]
+  shots.period <- pbp.shots %>% filter(Year==year & Game_Id==game & Period==period & Ev_Team=="Home")
+  if (dim(shots.period)[1] > 0) {
+    mean.home.xC <- mean(shots.period$xC, na.rm = TRUE)
+  } else if (dim(shots.period)[1] == 0) {
+    shots.period <- pbp.shots %>% filter(Year==year & Game_Id==game & Period==period & Ev_Team=="Away")
+    mean.home.xC <- -mean(shots.period$xC, na.rm = TRUE)
+  }
+  rm(shots.period)
+  if (mean.home.xC > 0) {
+    pbp.shots <- pbp.shots %>%
+      mutate(Direction = ifelse(Year==year & Game_Id==game & Period==period,
+                                ifelse(Ev_Team=="Home", "Right", "Left"), Direction))
+  } else if (mean.home.xC < 0) {
+    pbp.shots <- pbp.shots %>%
+      mutate(Direction = ifelse(Year==year & Game_Id==game & Period==period,
+                                ifelse(Ev_Team=="Home", "Left", "Right"), Direction))
+  }
+}
+rm(all.ygp, year, game, period, row, mean.home.xC)
+```
+
+## Standardize X-Y Coordinates for All Events
+
+```{r}
+pbp.shots.adj <- pbp.shots %>% 
+  mutate(y = ifelse(Direction=="Right", xC + 100, 100 - xC),
+         x = ifelse(Direction=="Right", 42.5 - yC, yC + 42.5),
+         # adjust for outdoor games where sides switched halfway thru period
+         Y = ifelse(Ev_Zone=="Off" & y < 100, 200 - y, y),
+         X = ifelse(Ev_Zone=="Off" & y < 100, 85 - x, x),
+         Home_Skaters = as.numeric(str_sub(Strength, start = 1, end = 1)),
+         Away_Skaters = as.numeric(str_sub(Strength, start = 3, end = 3)),
+         Ev_Skaters = ifelse(Ev_Team=="Home", Home_Skaters, Away_Skaters),
+         Other_Skaters = ifelse(Ev_Team=="Home", Away_Skaters, Home_Skaters),
+         Strength = ifelse(Ev_Skaters==Other_Skaters, "Even Strength",
+                           ifelse(Ev_Skaters>Other_Skaters, "Power Play", "Short-handed")),
+         # Strength = paste(Strength, " (", Ev_Skaters, "v", Other_Skaters, ")", sep = ""),
+         Ev_Score = ifelse(Ev_Team=="Home", Home_Score, Away_Score),
+         Other_Score = ifelse(Ev_Team=="Home", Away_Score, Home_Score),
+         Differential = ifelse(Ev_Score==Other_Score, "Tied",
+                               ifelse(Ev_Score>Other_Score, "Leading", "Trailing"))) %>% 
+  select(Year, Season, Game_Id, Date, Home_Team, Away_Team, Period, Seconds_Elapsed, Event, Type, Ev_Team, 
+         Ev_Zone, Direction, xC, yC, X, Y, p1_name, p1_ID, Strength, Home_Skaters, Away_Skaters, Differential,
+         Home_Score, Away_Score, Description) 
+```
+
+## Creating the Heat Map
+
+```{r}
+library(imager)
+rink.img <- load.image("hockey_rink.png")
+
+pbp.shots.filt <- filter(pbp.shots.adj, p1_name=="ALEX OVECHKIN")
+
+library(ggplot2)
+heatmap <- ggplot(pbp.shots.filt, aes(X,Y)) + 
+  annotation_raster(rink.img, xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf) +
+  stat_density2d(geom = "polygon", aes(fill = ..level..), alpha = 0.35) + 
+  geom_point(size = 0.5, alpha = 0.4) +
+  scale_fill_gradient(low = "green", high = "red") + 
+  scale_x_continuous(limits = c(0, 85), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(124.5, 200), expand = c(0, 0)) +
+  theme(legend.position = "none",
+        axis.line=element_blank(), axis.ticks=element_blank(),
+        axis.text.x=element_blank(), axis.text.y=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank()) +
+
+  coord_fixed()
+print(heatmap)
+```
